@@ -241,6 +241,17 @@ let height = stage.clientHeight;
 const projection = d3.geoEqualEarth();
 
 function refitProjection() {
+  // fitExtent needs at least two points to compute a meaningful bounding box —
+  // with zero or one tree, fall back to centering directly instead
+  if (testTrees.length === 0) {
+    projection.center([-9.1366, 38.7099]).scale(1000000).translate([width / 2, height / 2]);
+    return;
+  }
+  if (testTrees.length === 1) {
+    const t = testTrees[0];
+    projection.center([t.lng, t.lat]).scale(1000000).translate([width / 2, height / 2]);
+    return;
+  }
   const featureCollection = {
     type: "FeatureCollection",
     features: testTrees.map(t => ({
