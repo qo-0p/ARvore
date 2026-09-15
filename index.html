@@ -771,12 +771,13 @@ window.addEventListener("resize", () => {
     (snapshot) => {
       firebaseResponded = true;
       const trees = [];
+      let skippedForCoords = 0;
       snapshot.forEach((doc) => {
         const d = doc.data();
         const cc = d.centralContent || {};
         const lat = cc.latitude;
         const lng = cc.longitude;
-        if (typeof lat !== "number" || typeof lng !== "number") return; // skip docs missing coordinates
+        if (typeof lat !== "number" || typeof lng !== "number") { skippedForCoords++; return; }
         trees.push({
           id: doc.id,
           lat, lng,
@@ -788,7 +789,7 @@ window.addEventListener("resize", () => {
       window.setStatusDefault(
         trees.length
           ? `${trees.length} curated tree${trees.length === 1 ? "" : "s"} loaded from Firebase`
-          : "Connected to Firebase — 0 curatedTrees found"
+          : `Connected — ${snapshot.size} doc(s) in curatedTrees, ${skippedForCoords} skipped (bad/missing lat-lng)`
       );
       window.dispatchEvent(new CustomEvent("curated-trees-updated", { detail: trees }));
     },
