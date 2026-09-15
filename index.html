@@ -775,14 +775,15 @@ window.addEventListener("resize", () => {
       snapshot.forEach((doc) => {
         const d = doc.data();
         const cc = d.centralContent || {};
-        const lat = cc.latitude;
-        const lng = cc.longitude;
+        // check both possible locations: nested under centralContent, or at the document root
+        const lat = (typeof cc.latitude === "number") ? cc.latitude : d.latitude;
+        const lng = (typeof cc.longitude === "number") ? cc.longitude : d.longitude;
         if (typeof lat !== "number" || typeof lng !== "number") { skippedForCoords++; return; }
         trees.push({
           id: doc.id,
           lat, lng,
-          title: cc.title || "",
-          intro: cc.introText || cc.caption || "",
+          title: cc.title || d.title || "",
+          intro: cc.introText || cc.caption || d.introText || d.caption || "",
           centralContent: cc
         });
       });
