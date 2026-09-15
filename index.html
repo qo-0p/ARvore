@@ -91,22 +91,8 @@
     margin-top: 4px;
   }
 
-  /* TEMP placeholder standing in for a real photo, plain black/white — the
-     crossing effect recolors the real pixels in place, not a separate layer. */
-  .content-image {
-    width: 100%;
-    height: 120px;
-    margin-top: 6px;
-    border: 1px solid #2f7a3d;
-    background-color: #ffffff;
-    background-image:
-      linear-gradient(45deg, #000000 25%, transparent 25%),
-      linear-gradient(-45deg, #000000 25%, transparent 25%),
-      linear-gradient(45deg, transparent 75%, #000000 75%),
-      linear-gradient(-45deg, transparent 75%, #000000 75%);
-    background-size: 20px 20px;
-    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-  }
+  /* real photo — always forced to grayscale on display so the crossing effect
+     stays predictable regardless of the original file's actual colors */
   .content-text {
     background: #ffffff;
     border: 1px solid #d8d8d8;
@@ -122,26 +108,22 @@
     background-size: cover;
     background-position: center;
     background-color: #eeeeee;
-    filter: grayscale(100%); /* always black & white on display, whatever the original file's actual colors are */
+    filter: grayscale(100%);
+    position: relative;
+    overflow: hidden;
   }
-  .mask-wrap { position: relative; }
-  .mask-overlay {
+  .content-image-real.has-depth { cursor: grab; }
+  /* a real maskImageURL file overlaid on the photo, recolored: white areas
+     (the clickable region) -> green, black -> fully transparent */
+  .mask-visual {
     position: absolute;
     top: 0; left: 0;
     width: 100%; height: 100%;
-    pointer-events: none;
+    object-fit: fill;
+    pointer-events: none; /* the photo itself handles clicks, via pixel sampling */
+    filter: url(#mask-visual-filter);
   }
-  .mask-path {
-    fill: rgba(255, 255, 255, 0.001); /* practically invisible, but keeps the whole shape tappable */
-    stroke: #2f7a3d;
-    stroke-width: 2;
-    cursor: pointer;
-    pointer-events: all;
-  }
-  .mask-path.used {
-    stroke: #a8c4ac;
-    cursor: default;
-  }
+  .mask-visual.used { opacity: 0.35; }
   .keyword-highlight {
     background-color: #00FF00;
     color: #000000;
@@ -197,6 +179,14 @@
         0 0 0 0 0.239
         -0.333 -0.333 -0.333 0 1" />
     </filter>
+    <filter id="mask-visual-filter" color-interpolation-filters="sRGB">
+      <!-- opposite mapping: white (the clickable area) -> green, black -> fully transparent -->
+      <feColorMatrix type="matrix" values="
+        0 0 0 0 0.184
+        0 0 0 0 0.478
+        0 0 0 0 0.239
+        0.333 0.333 0.333 0 0" />
+    </filter>
   </defs>
 </svg>
 
@@ -205,7 +195,6 @@
   <div id="back-layer"></div>
   <div id="intro-layer"></div>
   <svg id="front-layer"></svg>
-  <div id="hint-banner">one finger: find and tap a tree — two fingers: move and zoom the map</div>
 </div>
 
 <script>
@@ -275,8 +264,10 @@ const zoom = d3.zoom()
     if (event.type === "touchstart" || event.type === "touchmove") {
       return event.touches && event.touches.length >= 2;
     }
-    // mouse/trackpad: default behavior (drag to pan, wheel to zoom)
-    return !event.ctrlKey && !event.button;
+    // mouse/trackpad: allow normal drag-to-pan and scroll/pinch-to-zoom —
+    // including ctrlKey wheel events (how trackpad pinch is reported), so the
+    // MAP zooms rather than the whole browser page zooming instead
+    return !event.button;
   })
   .on("zoom", (event) => {
     currentTransform = event.transform;
@@ -481,10 +472,7 @@ function openIntro(tree) {
   const introEl = document.createElement("div");
   introEl.className = "intro-box";
   introEl.dataset.id = tree.id;
-  introEl.innerHTML = `
-    <p>${tree.intro}</p>
-    <div class="hint">tap to open</div>
-  `;
+  introEl.innerHTML = `<p>${tree.intro}</p>`;
   introEl.addEventListener("click", (e) => {
     e.stopPropagation();
     expandContent(tree);
@@ -518,55 +506,117 @@ function expandContent(tree) {
   updateContentPositions();
 }
 
-// ---- demo renderer: image nodes get up to TWO clickable green-stroke mask
-// silhouettes; text nodes get up to TWO independently highlighted clickable
-// keywords. Each one's expansion inserts directly after itself — same
-// nesting rule as the real content: closer to what triggered it, pushing
-// older siblings down. ----
-const MASK_SHAPES = [
-  "M40,15 C60,5 90,8 100,25 C110,42 95,60 75,62 C55,64 35,55 32,38 C30,26 32,20 40,15 Z",
-  "M140,60 C165,50 195,58 205,78 C213,95 195,112 172,113 C150,114 128,102 128,85 C128,72 130,66 140,60 Z",
-  "M75,85 C95,78 120,82 128,95 C134,105 122,116 105,117 C88,118 72,110 70,98 C69,92 70,89 75,85 Z"
-];
-
+// ---- content renderer: image nodes get their real maskImageURL regions
+// (pixel-accurate hit-testing, not a guessed shape); text nodes get their
+// real highlighted keywords. Each one's expansion inserts directly after
+// itself — closer to what triggered it, pushing older siblings down. ----
 function renderChainNode(node, col, insertAfterEl) {
   if (!node) return null;
   const block = node.type === "image" ? renderImageNode(node, col) : renderTextNode(node, col);
+  if (!block) return null; // e.g. an image node with no real imageURL yet — nothing to insert
   if (insertAfterEl) insertAfterEl.insertAdjacentElement("afterend", block);
   else col.appendChild(block);
   return block;
 }
 
+// loads a mask image into an offscreen canvas once, for pixel sampling
+function loadMaskCanvas(url, callback) {
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    callback(canvas);
+  };
+  img.onerror = () => callback(null); // e.g. blocked by CORS, or bad URL — mask just won't be clickable
+  img.src = url;
+}
+
+// fracX/fracY: 0..1 position within the displayed image box
+function isMaskHit(canvas, fracX, fracY) {
+  if (!canvas) return false;
+  const px = Math.floor(fracX * canvas.width);
+  const py = Math.floor(fracY * canvas.height);
+  if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) return false;
+  try {
+    const data = canvas.getContext("2d").getImageData(px, py, 1, 1).data;
+    return (data[0] + data[1] + data[2]) / 3 > 128 && data[3] > 10; // bright and not transparent
+  } catch (e) {
+    return false; // canvas tainted by CORS — treat as no hit rather than throwing
+  }
+}
+
+// real depth-driven parallax: displaces the photo's pixels using its actual
+// depthMapURL file (brighter = nearer = shifts more), direction/intensity
+// following cursor or finger position. Experimental — needs a real depth
+// map to tune properly.
+let depthFilterCounter = 0;
+function applyParallax(block, depthMapURL) {
+  const filterId = `depth-filter-${depthFilterCounter++}`;
+  const svgFilter = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svgFilter.setAttribute("width", "0");
+  svgFilter.setAttribute("height", "0");
+  svgFilter.style.position = "absolute";
+  svgFilter.innerHTML = `<filter id="${filterId}">
+    <feImage href="${depthMapURL}" x="0" y="0" width="100%" height="100%" result="depthMap" preserveAspectRatio="none" />
+    <feDisplacementMap in="SourceGraphic" in2="depthMap" scale="0" xChannelSelector="R" yChannelSelector="G" />
+  </filter>`;
+  document.body.appendChild(svgFilter);
+  const displacementEl = svgFilter.querySelector("feDisplacementMap");
+
+  block.style.filter = (block.style.filter ? block.style.filter + " " : "") + `url(#${filterId})`;
+  block.classList.add("has-depth");
+
+  function setFromPoint(clientX, clientY) {
+    const rect = block.getBoundingClientRect();
+    const dx = ((clientX - rect.left) / rect.width - 0.5) * 2; // -1..1
+    displacementEl.setAttribute("scale", (dx * 20).toFixed(1));
+  }
+  block.addEventListener("pointermove", (e) => setFromPoint(e.clientX, e.clientY));
+  block.addEventListener("pointerleave", () => displacementEl.setAttribute("scale", "0"));
+}
+
 function renderImageNode(node, col) {
+  if (!node.imageURL) return null; // no real image in Firebase yet — render nothing, no placeholder
+
   const block = document.createElement("div");
-  block.className = (node.imageURL ? "content-image-real" : "content-image") + " mask-wrap";
-  if (node.imageURL) block.style.backgroundImage = `url("${node.imageURL}")`;
+  block.className = "content-image-real";
+  block.style.backgroundImage = `url("${node.imageURL}")`;
 
   const masks = Array.isArray(node.masks) ? node.masks : [];
-  if (masks.length) {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("class", "mask-overlay");
-    svg.setAttribute("viewBox", "0 0 220 120");
-    svg.setAttribute("preserveAspectRatio", "none");
-    masks.forEach((m, i) => {
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("class", "mask-path");
-      path.setAttribute("d", MASK_SHAPES[i % MASK_SHAPES.length]);
-      let used = false;
-      path.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (used) return;
-        used = true;
-        path.classList.add("used");
-        renderChainNode(m.next, col, block);
-        updateContentPositions();
-      });
-      svg.appendChild(path);
+  masks.forEach((m) => {
+    if (!m.maskImageURL) return; // no real mask file — skip this region entirely, no fake shape
+
+    const visual = document.createElement("img");
+    visual.className = "mask-visual";
+    visual.crossOrigin = "anonymous";
+    visual.src = m.maskImageURL;
+    block.appendChild(visual);
+
+    let hitCanvas = null;
+    loadMaskCanvas(m.maskImageURL, (canvas) => { hitCanvas = canvas; });
+
+    let used = false;
+    block.addEventListener("click", (e) => {
+      if (used || !hitCanvas) return;
+      const rect = block.getBoundingClientRect();
+      const fracX = (e.clientX - rect.left) / rect.width;
+      const fracY = (e.clientY - rect.top) / rect.height;
+      if (!isMaskHit(hitCanvas, fracX, fracY)) return; // clicked outside this mask's white region
+      used = true;
+      visual.classList.add("used");
+      renderChainNode(m.next, col, block);
+      updateContentPositions();
     });
-    block.appendChild(svg);
-  }
+  });
+
+  if (node.depthMapURL) applyParallax(block, node.depthMapURL);
+
   return block;
 }
+
 
 function renderTextNode(node, col) {
   const block = document.createElement("div");
@@ -621,22 +671,33 @@ function renderRealContent(tree, col) {
     col.appendChild(t);
   }
 
-  const rootNode = firebaseNodeToChain({
-    type: "image",
-    imageURL: cc.imageURL,
-    hotspots: cc.hotspots,
-    expansions: cc.expansions
-  });
+  const rootNode = firebaseNodeToChain(cc, true);
   renderChainNode(rootNode, col, null);
 }
 
-// converts one raw Firestore node (image: {imageURL, hotspots, expansions} or
-// text: {type:"text", text, keywords, expansions}) into the same generic
-// {type, masks/keywords} shape renderChainNode already knows how to draw —
-// so real Firebase content and the hand-written demo chains render identically
-function firebaseNodeToChain(raw) {
-  if (!raw) return { type: "text", text: "(missing content)" };
+// converts one raw Firestore node into the generic {type, masks/keywords}
+// shape renderChainNode knows how to draw. The CENTRAL image is always
+// treated as an image (it has no "type" field of its own by design). Any
+// OTHER node — an expansion — must explicitly say type:"image" or
+// type:"text"; anything ambiguous or malformed renders as nothing rather
+// than being guessed at, so incomplete Firebase data never produces a
+// fabricated placeholder.
+function firebaseNodeToChain(raw, isCentral) {
+  if (!raw) return null;
   const expansions = raw.expansions || {};
+
+  if (isCentral || raw.type === "image") {
+    const hotspots = Array.isArray(raw.hotspots) ? raw.hotspots : [];
+    return {
+      type: "image",
+      imageURL: raw.imageURL || "",
+      depthMapURL: raw.depthMapURL || "",
+      masks: hotspots.map(h => ({
+        maskImageURL: h.maskImageURL || "",
+        next: firebaseNodeToChain(expansions[h.expandsTo])
+      }))
+    };
+  }
 
   if (raw.type === "text") {
     const keywordsRaw = Array.isArray(raw.keywords) ? raw.keywords : [];
@@ -646,21 +707,11 @@ function firebaseNodeToChain(raw) {
       keywords: keywordsRaw.map(k => ({
         word: k.word,
         next: firebaseNodeToChain(expansions[k.expandsTo])
-                || { type: "text", text: `(no expansion found for key "${k.expandsTo}")` }
       }))
     };
   }
 
-  // everything else (type:"image", or the central image which has no "type" of its own)
-  const hotspots = Array.isArray(raw.hotspots) ? raw.hotspots : [];
-  return {
-    type: "image",
-    imageURL: raw.imageURL || "",
-    masks: hotspots.map(h => ({
-      next: firebaseNodeToChain(expansions[h.expandsTo])
-              || { type: "text", text: `(no expansion found for key "${h.expandsTo}")` }
-    }))
-  };
+  return null; // no recognized type — render nothing rather than guessing
 }
 
 // ---- crossing detector: finds every pair of currently-open content-columns
