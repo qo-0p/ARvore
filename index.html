@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARvore — Distributed Living Archive</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #ffffff;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    touch-action: none;
+  }
+  #stage {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh; /* modern mobile browsers: avoids the 100vh toolbar-overlap bug */
+    background: #ffffff;
+  }
+  /* BACK LAYER — expanded content columns live here, subject to the crossing effect */
+  #back-layer {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 1;
+    pointer-events: none; /* children opt back in individually */
+  }
+  /* INTRO LAYER — the small intro boxes, always opaque, always above the
+     expanded content, never touched by the crossing effect */
+  #intro-layer {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 5;
+    pointer-events: none; /* children opt back in individually */
+  }
+  /* FRONT LAYER — dots only, always on top visually, but its empty background
+     lets touches/clicks pass straight through to the content below; only the
+     dot hit-areas themselves opt back in to catching input. */
+  #front-layer {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 10;
+    cursor: grab;
+    pointer-events: none;
+  }
+  #front-layer:active { cursor: grabbing; }
+
+  .hit-area { fill: transparent; cursor: pointer; pointer-events: all; }
+  .dot {
+    fill: #2f7a3d;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    pointer-events: none;
+  }
+  .dot.revealed { opacity: 1; }
+  .dot.unlocked { opacity: 1; }
+
+  .content-column {
+    position: absolute;
+    width: 220px;
+    pointer-events: auto;
+    transform: translate(-50%, 0%);
+    font-size: 13px;
+    color: #1a1a1a;
+  }
+
+  .intro-box {
+    position: absolute;
+    width: 220px;
+    pointer-events: auto;
+    transform: translate(-50%, 0%);
+    font-size: 13px;
+    color: #1a1a1a;
+    background: #ffffff;
+    border: 1px solid #2f7a3d;
+    border-radius: 4px;
+    padding: 8px 10px;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  .intro-box p { line-height: 1.4; }
+  .intro-box .hint {
+    color: #6b6b6b;
+    font-size: 11px;
+    margin-top: 4px;
+  }
+
+  /* TEMP placeholder standing in for a real photo, plain black/white — the
+     crossing effect recolors the real pixels in place, not a separate layer. */
+  .content-image {
+    width: 100%;
+    height: 120px;
+    margin-top: 6px;
+    border: 1px solid #2f7a3d;
+    background-color: #ffffff;
+    background-image:
+      linear-gradient(45deg, #000000 25%, transparent 25%),
+      linear-gradient(-45deg, #000000 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #000000 75%),
+      linear-gradient(-45deg, transparent 75%, #000000 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+  }
+  .content-text {
+    background: #ffffff;
+    border: 1px solid #d8d8d8;
+    padding: 8px 10px;
+    line-height: 1.5;
+    margin-top: 6px;
+  }
+  .content-image-real {
+    width: 100%;
+    height: 140px;
+    margin-top: 6px;
+    border: 1px solid #2f7a3d;
+    background-size: cover;
+    background-position: center;
+    background-color: #eeeeee;
+  }
+  .mask-wrap { position: relative; }
+  .mask-overlay {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  .mask-path {
+    fill: rgba(255, 255, 255, 0.001); /* practically invisible, but keeps the whole shape tappable */
+    stroke: #2f7a3d;
+    stroke-width: 2;
+    cursor: pointer;
+    pointer-events: all;
+  }
+  .mask-path.used {
+    stroke: #a8c4ac;
+    cursor: default;
+  }
+  .keyword-highlight {
+    background-color: #00FF00;
+    color: #000000;
+    padding: 0 2px;
+    cursor: pointer;
+  }
+  .keyword-highlight.used {
+    background-color: #cfffcf;
+    color: #6b6b6b;
+    cursor: default;
+  }
+
+  #hint-banner {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    color: #8a8a8a;
+    z-index: 20;
+    pointer-events: none;
+    text-align: center;
+    width: 90%;
+  }
+  #status-bar {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 30px;
+    background: rgba(0, 0, 0, 0.45);
+    color: #ffffff;
+    font-size: 12px;
+    line-height: 30px;
+    padding: 0 12px;
+    box-sizing: border-box;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    z-index: 30;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <filter id="crossing-filter" color-interpolation-filters="sRGB">
+      <!-- black -> green, white -> fully transparent, grays interpolate between -->
+      <feColorMatrix type="matrix" values="
+        0 0 0 0 0.184
+        0 0 0 0 0.478
+        0 0 0 0 0.239
+        -0.333 -0.333 -0.333 0 1" />
+    </filter>
+  </defs>
+</svg>
+
+<div id="status-bar"></div>
+<div id="stage">
+  <div id="back-layer"></div>
+  <div id="intro-layer"></div>
+  <svg id="front-layer"></svg>
+  <div id="hint-banner">one finger: find and tap a tree — two fingers: move and zoom the map</div>
+</div>
+
+<script>
+// ---- demo chains: every image node gets THREE independent masks, every text
+// node gets TWO independent highlighted keywords, generated recursively so
+// the rule holds at every depth, not just the top level — genuinely
+// rhizomatic branching, not a single-path tree. ----
+
+// ---- live data: populated entirely from the curatedTrees Firebase
+// collection — empty until Firebase connects, no test/demo trees included ----
+let testTrees = [];
+
+const unlocked = new Set(JSON.parse(localStorage.getItem("arvore_unlocked") || "[]"));
+let openIds = new Set(); // TEMP: multiple can be open at once, just for testing the overlap effect
+
+const stage = document.getElementById("stage");
+const svg = d3.select("#front-layer");
+const backLayer = document.getElementById("back-layer");
+const introLayer = document.getElementById("intro-layer");
+const statusBar = document.getElementById("status-bar");
+let statusDefaultText = "";
+function setStatusDefault(text) {
+  statusDefaultText = text;
+  statusBar.textContent = text;
+}
+function showHoverTitle(tree) {
+  statusBar.textContent = tree ? (tree.title || tree.intro) : statusDefaultText;
+}
+
+let width = stage.clientWidth;
+let height = stage.clientHeight;
+
+const projection = d3.geoEqualEarth();
+
+function refitProjection() {
+  const featureCollection = {
+    type: "FeatureCollection",
+    features: testTrees.map(t => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [t.lng, t.lat] }
+    }))
+  };
+  const pad = 60;
+  projection.fitExtent([[pad, pad], [width - pad, height - pad]], featureCollection);
+}
+refitProjection();
+
+const zoomLayer = svg.append("g").attr("id", "zoom-layer");
+let currentTransform = d3.zoomIdentity;
+
+const zoom = d3.zoom()
+  .scaleExtent([0.5, 25])
+  .filter((event) => {
+    // touch: only ever let d3.zoom take over once a SECOND finger is down —
+    // a single finger is reserved for hovering/tapping trees, not panning.
+    if (event.type === "touchstart" || event.type === "touchmove") {
+      return event.touches && event.touches.length >= 2;
+    }
+    // mouse/trackpad: default behavior (drag to pan, wheel to zoom)
+    return !event.ctrlKey && !event.button;
+  })
+  .on("zoom", (event) => {
+    currentTransform = event.transform;
+    zoomLayer.attr("transform", currentTransform);
+    updateContentPositions();
+  });
+
+d3.select(stage).call(zoom);
+
+// ---- one-finger "cursor" simulation for touch: hover-by-proximity + tap-to-click ----
+// Uses Pointer Events (more reliable across iOS/Android than raw Touch Events).
+const HIT_RADIUS = 34;
+
+function toStageCoords(clientX, clientY) {
+  const rect = svg.node().getBoundingClientRect();
+  return [clientX - rect.left, clientY - rect.top];
+}
+
+function treeNear(clientX, clientY, radius) {
+  const [px, py] = toStageCoords(clientX, clientY);
+  let closest = null, closestDist = Infinity;
+  testTrees.forEach(t => {
+    const [sx, sy] = projectedScreenPoint(t.lat, t.lng);
+    const d = Math.hypot(sx - px, sy - py);
+    if (d < radius && d < closestDist) { closest = t; closestDist = d; }
+  });
+  return closest;
+}
+
+function setRevealed(id, revealed) {
+  zoomLayer.selectAll(".dot-group").filter(d => d.id === id)
+    .select(".dot").classed("revealed", revealed);
+}
+
+function clearHoverOnly() {
+  testTrees.forEach(t => {
+    if (!unlocked.has(t.id) && !openIds.has(t.id)) setRevealed(t.id, false);
+  });
+  showHoverTitle(null);
+}
+
+let activePointerId = null;
+let pointerStart = null;
+let lastHandledId = null;
+let lastHandledTime = 0;
+
+stage.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse") return; // desktop mouse already handled by hover circles
+  if (activePointerId !== null) return;  // a 2nd finger goes to d3.zoom for pan/pinch
+  activePointerId = e.pointerId;
+  pointerStart = { x: e.clientX, y: e.clientY, time: Date.now(), moved: false };
+  const near = treeNear(e.clientX, e.clientY, HIT_RADIUS);
+  testTrees.forEach(tree => setRevealed(tree.id, unlocked.has(tree.id) || openIds.has(tree.id) || tree === near));
+  showHoverTitle(near);
+});
+
+stage.addEventListener("pointermove", (e) => {
+  if (e.pointerId !== activePointerId) return;
+  if (Math.hypot(e.clientX - pointerStart.x, e.clientY - pointerStart.y) > 10) pointerStart.moved = true;
+  const near = treeNear(e.clientX, e.clientY, HIT_RADIUS);
+  testTrees.forEach(tree => setRevealed(tree.id, unlocked.has(tree.id) || openIds.has(tree.id) || tree === near));
+  showHoverTitle(near);
+});
+
+function endPointer(e) {
+  if (e.pointerId !== activePointerId) return;
+  const duration = Date.now() - pointerStart.time;
+  const releasedOnContent = e.target.closest && e.target.closest(".content-column, .intro-box");
+  if (!pointerStart.moved && duration < 500 && !releasedOnContent) {
+    const tree = treeNear(e.clientX, e.clientY, HIT_RADIUS);
+    if (tree) handleDotClick(tree);
+  }
+  clearHoverOnly();
+  activePointerId = null;
+  pointerStart = null;
+}
+
+stage.addEventListener("pointerup", endPointer);
+stage.addEventListener("pointercancel", endPointer);
+
+function projectedScreenPoint(lat, lng) {
+  const [x, y] = projection([lng, lat]);
+  return currentTransform.apply([x, y]);
+}
+
+function updateContentPositions() {
+  const stageRect = stage.getBoundingClientRect();
+
+  // intro boxes: top-pinned just below the dot, growing downward
+  document.querySelectorAll(".intro-box").forEach(introEl => {
+    const id = introEl.dataset.id;
+    const tree = testTrees.find(t => t.id === id);
+    const [sx, sy] = projectedScreenPoint(tree.lat, tree.lng);
+    introEl.style.left = sx + "px";
+    introEl.style.top = (sy + 14) + "px";
+  });
+
+  // content columns: top-pinned directly below their own intro box's bottom edge,
+  // so reading order runs dot -> intro -> content, all growing downward
+  document.querySelectorAll(".content-column").forEach(el => {
+    const id = el.dataset.id;
+    const tree = testTrees.find(t => t.id === id);
+    const [sx, sy] = projectedScreenPoint(tree.lat, tree.lng);
+    const introEl = introLayer.querySelector(`.intro-box[data-id="${id}"]`);
+    let topY = sy + 14;
+    if (introEl) {
+      const introRect = introEl.getBoundingClientRect();
+      topY = introRect.bottom - stageRect.top;
+    }
+    el.style.left = sx + "px";
+    el.style.top = topY + "px";
+  });
+
+  updateCrossings();
+}
+
+// several irregular blob variants, similarly sized/bounded, so one map
+// transform works for all of them — picked per tree (via a hash of its id),
+// not per render, so the same tree always keeps the same shape
+const DOT_SHAPES = [
+  "M40,15 C60,5 90,8 100,25 C110,42 95,60 75,62 C55,64 35,55 32,38 C30,26 32,20 40,15 Z",
+  "M35,25 C45,8 75,5 95,18 C112,30 108,50 88,58 C68,66 45,62 35,48 C28,38 28,32 35,25 Z",
+  "M50,10 C70,8 95,20 98,38 C100,52 82,64 62,63 C42,62 28,50 30,35 C32,22 38,12 50,10 Z",
+  "M45,12 C65,6 88,15 96,32 C104,48 90,62 70,64 C50,66 32,56 30,40 C28,26 32,18 45,12 Z"
+];
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+let dotGroups = zoomLayer.selectAll(".dot-group").data([]);
+
+function renderTrees(trees) {
+  testTrees = trees;
+  refitProjection();
+
+  const join = zoomLayer.selectAll(".dot-group").data(testTrees, d => d.id);
+  join.exit().remove();
+
+  const entered = join.enter()
+    .append("g")
+    .attr("class", "dot-group");
+
+  entered.append("circle")
+    .attr("class", "hit-area")
+    .attr("r", 18)
+    .on("mouseenter", function (event, d) {
+      d3.select(this.parentNode).select(".dot").classed("revealed", true);
+      showHoverTitle(d);
+    })
+    .on("mouseleave", function (event, d) {
+      if (!unlocked.has(d.id)) {
+        d3.select(this.parentNode).select(".dot").classed("revealed", false);
+      }
+      showHoverTitle(null);
+    })
+    .on("click", function (event, d) {
+      event.stopPropagation();
+      if (d.id === lastHandledId && Date.now() - lastHandledTime < 600) return; // already handled via touch
+      handleDotClick(d);
+    });
+
+  entered.append("path")
+    .attr("class", d => "dot" + (unlocked.has(d.id) ? " unlocked" : ""))
+    .attr("d", d => DOT_SHAPES[hashStr(d.id) % DOT_SHAPES.length])
+    .attr("transform", "scale(0.2) translate(-70,-34.5)");
+
+  dotGroups = entered.merge(join);
+  dotGroups.attr("transform", d => {
+    const [x, y] = projection([d.lng, d.lat]);
+    return `translate(${x},${y})`;
+  });
+
+  updateContentPositions();
+}
+
+renderTrees(testTrees); // draw the 10 test trees immediately; Firebase will replace this once it connects
+setStatusDefault("Connecting to Firebase…");
+
+window.addEventListener("curated-trees-updated", (e) => renderTrees(e.detail));
+
+function handleDotClick(tree) {
+  lastHandledId = tree.id;
+  lastHandledTime = Date.now();
+  if (openIds.has(tree.id)) {
+    closeContent(tree.id);
+    return;
+  }
+  // TEMP: not closing other open columns here, so overlap is testable.
+  // Final locked behavior (Option A) closes the previous column on new click —
+  // re-add `if (openIds.size) [...openIds].forEach(closeContent);` to restore it.
+  openIntro(tree);
+}
+
+let columnOpenCount = 0;
+
+function openIntro(tree) {
+  openIds.add(tree.id);
+  columnOpenCount++;
+
+  const introEl = document.createElement("div");
+  introEl.className = "intro-box";
+  introEl.dataset.id = tree.id;
+  introEl.innerHTML = `
+    <p>${tree.intro}</p>
+    <div class="hint">tap to open</div>
+  `;
+  introEl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    expandContent(tree);
+  });
+  introLayer.appendChild(introEl);
+  updateContentPositions();
+}
+
+function expandContent(tree) {
+  markUnlocked(tree.id);
+  const introEl = introLayer.querySelector(`.intro-box[data-id="${tree.id}"]`);
+  const hint = introEl.querySelector(".hint");
+  if (hint) hint.remove();
+
+  const col = document.createElement("div");
+  col.className = "content-column";
+  col.dataset.id = tree.id;
+
+  if (tree.centralContent) {
+    renderRealContent(tree, col);
+  } else {
+    // shouldn't normally happen — every tree comes from Firebase with centralContent —
+    // but shows something sensible instead of a blank column if a doc is malformed
+    const t = document.createElement("div");
+    t.className = "content-text";
+    t.textContent = "(no content found for this tree)";
+    col.appendChild(t);
+  }
+
+  backLayer.appendChild(col);
+  updateContentPositions();
+}
+
+// ---- demo renderer: image nodes get up to TWO clickable green-stroke mask
+// silhouettes; text nodes get up to TWO independently highlighted clickable
+// keywords. Each one's expansion inserts directly after itself — same
+// nesting rule as the real content: closer to what triggered it, pushing
+// older siblings down. ----
+const MASK_SHAPES = [
+  "M40,15 C60,5 90,8 100,25 C110,42 95,60 75,62 C55,64 35,55 32,38 C30,26 32,20 40,15 Z",
+  "M140,60 C165,50 195,58 205,78 C213,95 195,112 172,113 C150,114 128,102 128,85 C128,72 130,66 140,60 Z",
+  "M75,85 C95,78 120,82 128,95 C134,105 122,116 105,117 C88,118 72,110 70,98 C69,92 70,89 75,85 Z"
+];
+
+function renderChainNode(node, col, insertAfterEl) {
+  if (!node) return null;
+  const block = node.type === "image" ? renderImageNode(node, col) : renderTextNode(node, col);
+  if (insertAfterEl) insertAfterEl.insertAdjacentElement("afterend", block);
+  else col.appendChild(block);
+  return block;
+}
+
+function renderImageNode(node, col) {
+  const block = document.createElement("div");
+  block.className = (node.imageURL ? "content-image-real" : "content-image") + " mask-wrap";
+  if (node.imageURL) block.style.backgroundImage = `url("${node.imageURL}")`;
+
+  const masks = Array.isArray(node.masks) ? node.masks : [];
+  if (masks.length) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "mask-overlay");
+    svg.setAttribute("viewBox", "0 0 220 120");
+    svg.setAttribute("preserveAspectRatio", "none");
+    masks.forEach((m, i) => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("class", "mask-path");
+      path.setAttribute("d", MASK_SHAPES[i % MASK_SHAPES.length]);
+      let used = false;
+      path.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (used) return;
+        used = true;
+        path.classList.add("used");
+        renderChainNode(m.next, col, block);
+        updateContentPositions();
+      });
+      svg.appendChild(path);
+    });
+    block.appendChild(svg);
+  }
+  return block;
+}
+
+function renderTextNode(node, col) {
+  const block = document.createElement("div");
+  block.className = "content-text";
+
+  const keywords = Array.isArray(node.keywords) ? node.keywords : [];
+  const found = keywords
+    .map(k => ({ ...k, idx: node.text.indexOf(k.word) }))
+    .filter(k => k.idx !== -1)
+    .sort((a, b) => a.idx - b.idx);
+
+  if (!found.length) {
+    block.textContent = node.text;
+    return block;
+  }
+
+  let cursor = 0;
+  found.forEach(k => {
+    if (k.idx > cursor) block.appendChild(document.createTextNode(node.text.slice(cursor, k.idx)));
+    const span = document.createElement("span");
+    span.className = "keyword-highlight";
+    span.textContent = k.word;
+    let used = false;
+    span.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (used) return;
+      used = true;
+      span.classList.add("used");
+      renderChainNode(k.next, col, block);
+      updateContentPositions();
+    });
+    block.appendChild(span);
+    cursor = k.idx + k.word.length;
+  });
+  if (cursor < node.text.length) block.appendChild(document.createTextNode(node.text.slice(cursor)));
+  return block;
+}
+
+
+// real path: central caption + central image, then a row of hotspot chips
+// (standing in for real image-region taps until mask assets exist) — tapping
+// one appends its linked expansions[hotspot.expandsTo] entry below, in
+// whatever order the person taps them, same column, growing downward.
+function renderRealContent(tree, col) {
+  const cc = tree.centralContent;
+
+  const captionText = cc.introText || cc.caption || "";
+  if (captionText) {
+    const t = document.createElement("div");
+    t.className = "content-text";
+    t.textContent = captionText;
+    col.appendChild(t);
+  }
+
+  const rootNode = firebaseNodeToChain({
+    type: "image",
+    imageURL: cc.imageURL,
+    hotspots: cc.hotspots,
+    expansions: cc.expansions
+  });
+  renderChainNode(rootNode, col, null);
+}
+
+// converts one raw Firestore node (image: {imageURL, hotspots, expansions} or
+// text: {type:"text", text, keywords, expansions}) into the same generic
+// {type, masks/keywords} shape renderChainNode already knows how to draw —
+// so real Firebase content and the hand-written demo chains render identically
+function firebaseNodeToChain(raw) {
+  if (!raw) return { type: "text", text: "(missing content)" };
+  const expansions = raw.expansions || {};
+
+  if (raw.type === "text") {
+    const keywordsRaw = Array.isArray(raw.keywords) ? raw.keywords : [];
+    return {
+      type: "text",
+      text: raw.text || "",
+      keywords: keywordsRaw.map(k => ({
+        word: k.word,
+        next: firebaseNodeToChain(expansions[k.expandsTo])
+                || { type: "text", text: `(no expansion found for key "${k.expandsTo}")` }
+      }))
+    };
+  }
+
+  // everything else (type:"image", or the central image which has no "type" of its own)
+  const hotspots = Array.isArray(raw.hotspots) ? raw.hotspots : [];
+  return {
+    type: "image",
+    imageURL: raw.imageURL || "",
+    masks: hotspots.map(h => ({
+      next: firebaseNodeToChain(expansions[h.expandsTo])
+              || { type: "text", text: `(no expansion found for key "${h.expandsTo}")` }
+    }))
+  };
+}
+
+// ---- crossing detector: finds every pair of currently-open content-columns
+// that overlap on screen (whole column — text and images alike). Whichever
+// column is painted on top (later in DOM order) gets an actual hole clipped
+// out of it at the intersection rectangle. A color-filtered CLONE of that
+// same column is placed in the hole, clipped to show only that rectangle —
+// so what appears there is the real content (same checker phase, same text),
+// just recolored: black -> green, white -> fully transparent. Pull the
+// columns apart and both the hole and the clone disappear. Intro boxes live
+// in their own separate always-opaque layer, so they're never affected. ----
+function updateCrossings() {
+  const columns = Array.from(document.querySelectorAll(".content-column"));
+  document.querySelectorAll(".crossing-clone").forEach(el => el.remove());
+  columns.forEach(col => { col.style.clipPath = ""; });
+
+  const holesByColumn = new Map();
+
+  for (let i = 0; i < columns.length; i++) {
+    for (let j = i + 1; j < columns.length; j++) {
+      const a = columns[i].getBoundingClientRect();
+      const b = columns[j].getBoundingClientRect(); // j is later in DOM => painted on top
+      const ix1 = Math.max(a.left, b.left);
+      const iy1 = Math.max(a.top, b.top);
+      const ix2 = Math.min(a.right, b.right);
+      const iy2 = Math.min(a.bottom, b.bottom);
+      if (ix2 <= ix1 || iy2 <= iy1) continue;
+
+      const topCol = columns[j];
+      if (!holesByColumn.has(topCol)) holesByColumn.set(topCol, []);
+      holesByColumn.get(topCol).push({
+        left: ix1 - b.left, top: iy1 - b.top,
+        right: ix2 - b.left, bottom: iy2 - b.top
+      });
+    }
+  }
+
+  holesByColumn.forEach((holes, col) => {
+    const r = col.getBoundingClientRect();
+    let holesPath = "";
+    holes.forEach(h => {
+      holesPath += ` M${h.left},${h.top} L${h.right},${h.top} L${h.right},${h.bottom} L${h.left},${h.bottom} Z`;
+    });
+
+    // punch the hole(s) out of the original — it goes normal-colored everywhere else
+    const outer = `M0,0 L${r.width},0 L${r.width},${r.height} L0,${r.height} Z`;
+    col.style.clipPath = `path(evenodd, "${outer}${holesPath}")`;
+
+    // a recolored clone of the exact same content, visible only inside the hole(s)
+    const clone = col.cloneNode(true);
+    clone.classList.add("crossing-clone");
+    clone.style.left = col.style.left;
+    clone.style.top = col.style.top;
+    clone.style.clipPath = `path("${holesPath}")`;
+    clone.style.filter = "url(#crossing-filter)";
+    clone.style.pointerEvents = "none";
+    backLayer.appendChild(clone);
+  });
+}
+
+function closeContent(id) {
+  const introEl = introLayer.querySelector(`.intro-box[data-id="${id}"]`);
+  if (introEl) introEl.remove();
+  const col = backLayer.querySelector(`.content-column[data-id="${id}"]`);
+  if (col) col.remove();
+  if (!unlocked.has(id)) {
+    zoomLayer.selectAll(".dot-group").filter(d => d.id === id)
+      .select(".dot").classed("revealed", false);
+  }
+  openIds.delete(id);
+  updateCrossings();
+}
+
+function markUnlocked(id) {
+  unlocked.add(id);
+  localStorage.setItem("arvore_unlocked", JSON.stringify([...unlocked]));
+  zoomLayer.selectAll(".dot-group").filter(d => d.id === id)
+    .select(".dot").classed("unlocked", true).classed("revealed", true);
+}
+
+window.addEventListener("resize", () => {
+  width = stage.clientWidth;
+  height = stage.clientHeight;
+  refitProjection();
+  dotGroups.attr("transform", d => {
+    const [x, y] = projection([d.lng, d.lat]);
+    return `translate(${x},${y})`;
+  });
+  updateContentPositions();
+});</script>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+  import { getFirestore, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAlXVgIBfWnPfFU6b5CCs6nVVjFAIUibJ0",
+    authDomain: "arvore-efd61.firebaseapp.com",
+    projectId: "arvore-efd61",
+    storageBucket: "arvore-efd61.firebasestorage.app",
+    messagingSenderId: "162175855448",
+    appId: "1:162175855448:web:f83864f95567b63f43532d"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  // Your data nests everything inside a "centralContent" map field, not at
+  // the document root — matching that structure here.
+  let firebaseResponded = false;
+  setTimeout(() => {
+    if (!firebaseResponded) {
+      window.setStatusDefault("Still connecting after 8s — check your Firestore rules were actually published");
+    }
+  }, 8000);
+
+  onSnapshot(
+    collection(db, "curatedTrees"),
+    (snapshot) => {
+      firebaseResponded = true;
+      const trees = [];
+      snapshot.forEach((doc) => {
+        const d = doc.data();
+        const cc = d.centralContent || {};
+        const lat = cc.latitude;
+        const lng = cc.longitude;
+        if (typeof lat !== "number" || typeof lng !== "number") return; // skip docs missing coordinates
+        trees.push({
+          id: doc.id,
+          lat, lng,
+          title: cc.title || "",
+          intro: cc.introText || cc.caption || "",
+          centralContent: cc
+        });
+      });
+      window.setStatusDefault(
+        trees.length
+          ? `${trees.length} curated tree${trees.length === 1 ? "" : "s"} loaded from Firebase`
+          : "Connected to Firebase — 0 curatedTrees found"
+      );
+      window.dispatchEvent(new CustomEvent("curated-trees-updated", { detail: trees }));
+    },
+    (error) => {
+      firebaseResponded = true;
+      window.setStatusDefault(`Firebase error: ${error.message}`);
+    }
+  );
+</script>
+
+</body>
+</html>
