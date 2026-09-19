@@ -81,15 +81,9 @@
     border: 1px solid #2f7a3d;
     border-radius: 4px;
     padding: 8px 10px;
-    cursor: pointer;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
   }
   .intro-box p { line-height: 1.4; }
-  .intro-box .hint {
-    color: #6b6b6b;
-    font-size: 11px;
-    margin-top: 4px;
-  }
 
   /* real photo — always forced to grayscale on display so the crossing effect
      stays predictable regardless of the original file's actual colors */
@@ -122,8 +116,10 @@
     object-fit: fill;
     pointer-events: none; /* the photo itself handles clicks, via pixel sampling */
     filter: url(#mask-visual-filter);
+    opacity: 0; /* invisible by default — just the plain photo shows until clicked */
+    transition: opacity 0.15s ease;
   }
-  .mask-visual.used { opacity: 0.35; }
+  .mask-visual.used { opacity: 1; } /* green once its content is expanded; back to 0 when collapsed again */
   .keyword-highlight {
     background-color: #00FF00;
     color: #000000;
@@ -131,9 +127,30 @@
     cursor: pointer;
   }
   .keyword-highlight.used {
-    background-color: #cfffcf;
-    color: #6b6b6b;
-    cursor: default;
+    background-color: transparent;
+    color: #00FF00;
+    padding: 0 2px;
+    cursor: pointer;
+  }
+  .content-media {
+    width: 100%;
+    margin-top: 6px;
+    border: 1px solid #2f7a3d;
+    display: block;
+  }
+  .content-media-audio {
+    width: 100%;
+    margin-top: 6px;
+    display: block;
+  }
+  .content-file-link {
+    display: block;
+    margin-top: 6px;
+    padding: 8px 10px;
+    border: 1px solid #2f7a3d;
+    color: #2f7a3d;
+    text-decoration: none;
+    font-size: 13px;
   }
 
   #hint-banner {
@@ -463,57 +480,104 @@ function handleDotClick(tree) {
   openIntro(tree);
 }
 
-let columnOpenCount = 0;
-
 function openIntro(tree) {
   openIds.add(tree.id);
-  columnOpenCount++;
 
   const introEl = document.createElement("div");
   introEl.className = "intro-box";
   introEl.dataset.id = tree.id;
-  introEl.innerHTML = `<p>${tree.intro}</p>`;
-  introEl.addEventListener("click", (e) => {
-    e.stopPropagation();
-    expandContent(tree);
-  });
   introLayer.appendChild(introEl);
+
+  // the intro is always text with its own highlighted keywords — each one
+  // opens its own independent root branch (its own "central content"),
+  // not nested under the others, just appended alongside as a sibling
+  const introNode = buildIntroNode(tree.introRaw || {});
+  const p = document.createElement("p");
+  introEl.appendChild(p);
+
+  const keywords = Array.isArray(introNode.keywords) ? introNode.keywords : [];
+  const found = keywords
+    .map(k => ({ ...k, idx: introNode.text.indexOf(k.word) }))
+    .filter(k => k.idx !== -1)
+    .sort((a, b) => a.idx - b.idx);
+
+  if (!found.length) {
+    p.textContent = introNode.text;
+  } else {
+    let cursor = 0;
+    found.forEach(k => {
+      if (k.idx > cursor) p.appendChild(document.createTextNode(introNode.text.slice(cursor, k.idx)));
+      const span = document.createElement("span");
+      span.className = "keyword-highlight";
+      span.textContent = k.word;
+      let rootBlock = null;
+      span.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (rootBlock) {
+          // second click: recollect this whole root branch and everything it grew
+          collapseBlock(rootBlock);
+          rootBlock = null;
+          span.classList.remove("used");
+          const col = backLayer.querySelector(`.content-column[data-id="${tree.id}"]`);
+          if (col && !col.hasChildNodes()) col.remove();
+        } else {
+          rootBlock = openRootContent(tree, k.next);
+          if (rootBlock) span.classList.add("used");
+        }
+        updateContentPositions();
+      });
+      p.appendChild(span);
+      cursor = k.idx + k.word.length;
+    });
+    if (cursor < introNode.text.length) p.appendChild(document.createTextNode(introNode.text.slice(cursor)));
+  }
+
   updateContentPositions();
 }
 
-function expandContent(tree) {
+// each intro keyword click lands here — creates the tree's content column on
+// first use, then appends this keyword's own central content (image or text)
+// as a new sibling root at the end of that column
+function openRootContent(tree, node) {
+  if (!node) return null; // that keyword's expansion is missing/malformed in Firebase — nothing to show
   markUnlocked(tree.id);
-  const introEl = introLayer.querySelector(`.intro-box[data-id="${tree.id}"]`);
-  const hint = introEl.querySelector(".hint");
-  if (hint) hint.remove();
 
-  const col = document.createElement("div");
-  col.className = "content-column";
-  col.dataset.id = tree.id;
-
-  if (tree.centralContent) {
-    renderRealContent(tree, col);
-  } else {
-    // shouldn't normally happen — every tree comes from Firebase with centralContent —
-    // but shows something sensible instead of a blank column if a doc is malformed
-    const t = document.createElement("div");
-    t.className = "content-text";
-    t.textContent = "(no content found for this tree)";
-    col.appendChild(t);
+  let col = backLayer.querySelector(`.content-column[data-id="${tree.id}"]`);
+  if (!col) {
+    col = document.createElement("div");
+    col.className = "content-column";
+    col.dataset.id = tree.id;
+    backLayer.appendChild(col);
   }
-
-  backLayer.appendChild(col);
+  const block = renderChainNode(node, col, null);
   updateContentPositions();
+  return block;
 }
 
 // ---- content renderer: image nodes get their real maskImageURL regions
 // (pixel-accurate hit-testing, not a guessed shape); text nodes get their
 // real highlighted keywords. Each one's expansion inserts directly after
 // itself — closer to what triggered it, pushing older siblings down. ----
+// recursively removes a spawned block and everything IT spawned in turn —
+// used whenever a mask or keyword is clicked a second time to "recollect"
+// everything that grew from it. Re-clicking builds it fresh again from
+// scratch, so no state needs resetting elsewhere, only removal.
+function collapseBlock(block) {
+  if (block._spawned) {
+    block._spawned.slice().forEach(child => collapseBlock(child));
+  }
+  block.remove();
+}
+
 function renderChainNode(node, col, insertAfterEl) {
   if (!node) return null;
-  const block = node.type === "image" ? renderImageNode(node, col) : renderTextNode(node, col);
-  if (!block) return null; // e.g. an image node with no real imageURL yet — nothing to insert
+  let block;
+  if (node.type === "image") block = renderImageNode(node, col);
+  else if (node.type === "video") block = renderVideoNode(node, col);
+  else if (node.type === "audio") block = renderAudioNode(node, col);
+  else if (node.type === "file" || node.type === "pdf") block = renderFileNode(node);
+  else block = renderTextNode(node, col);
+  if (!block) return null; // e.g. a media node with no real URL yet — nothing to insert
   if (insertAfterEl) insertAfterEl.insertAdjacentElement("afterend", block);
   else col.appendChild(block);
   return block;
@@ -584,6 +648,7 @@ function renderImageNode(node, col) {
   const block = document.createElement("div");
   block.className = "content-image-real";
   block.style.backgroundImage = `url("${node.imageURL}")`;
+  block._spawned = [];
 
   const masks = Array.isArray(node.masks) ? node.masks : [];
   masks.forEach((m) => {
@@ -598,16 +663,27 @@ function renderImageNode(node, col) {
     let hitCanvas = null;
     loadMaskCanvas(m.maskImageURL, (canvas) => { hitCanvas = canvas; });
 
-    let used = false;
+    let spawnedBlock = null;
     block.addEventListener("click", (e) => {
-      if (used || !hitCanvas) return;
+      if (!hitCanvas) return;
       const rect = block.getBoundingClientRect();
       const fracX = (e.clientX - rect.left) / rect.width;
       const fracY = (e.clientY - rect.top) / rect.height;
       if (!isMaskHit(hitCanvas, fracX, fracY)) return; // clicked outside this mask's white region
-      used = true;
-      visual.classList.add("used");
-      renderChainNode(m.next, col, block);
+
+      if (spawnedBlock) {
+        // second click on the same mask: recollect everything it grew
+        block._spawned = block._spawned.filter(b => b !== spawnedBlock);
+        collapseBlock(spawnedBlock);
+        spawnedBlock = null;
+        visual.classList.remove("used");
+      } else {
+        spawnedBlock = renderChainNode(m.next, col, block);
+        if (spawnedBlock) {
+          block._spawned.push(spawnedBlock);
+          visual.classList.add("used");
+        }
+      }
       updateContentPositions();
     });
   });
@@ -618,9 +694,60 @@ function renderImageNode(node, col) {
 }
 
 
+function renderVideoNode(node, col) {
+  if (!node.mediaURL) return null; // no real file yet — nothing to show
+  const block = document.createElement("video");
+  block.className = "content-media";
+  block.src = node.mediaURL;
+  block.controls = true;
+  block.playsInline = true;
+  attachTimestamps(block, node, col);
+  return block;
+}
+
+function renderAudioNode(node, col) {
+  if (!node.mediaURL) return null;
+  const block = document.createElement("audio");
+  block.className = "content-media-audio";
+  block.src = node.mediaURL;
+  block.controls = true;
+  attachTimestamps(block, node, col);
+  return block;
+}
+
+// as playback crosses each configured timestamp, its linked expansion just
+// pops in — right after the media element (so the newest sits closest to
+// it, older ones pushed down, same "insert after trigger" rule as
+// everything else). Playback itself is never paused or interrupted.
+function attachTimestamps(mediaEl, node, col) {
+  const stamps = Array.isArray(node.timestamps) ? node.timestamps : [];
+  if (!stamps.length) return;
+  const triggered = new Set();
+  mediaEl.addEventListener("timeupdate", () => {
+    stamps.forEach((t, i) => {
+      if (triggered.has(i) || mediaEl.currentTime < t.atSeconds) return;
+      triggered.add(i);
+      renderChainNode(t.next, col, mediaEl);
+      updateContentPositions();
+    });
+  });
+}
+
+function renderFileNode(node) {
+  if (!node.mediaURL) return null;
+  const block = document.createElement("a");
+  block.className = "content-file-link";
+  block.href = node.mediaURL;
+  block.target = "_blank";
+  block.rel = "noopener";
+  block.textContent = "Open file ↗";
+  return block;
+}
+
 function renderTextNode(node, col) {
   const block = document.createElement("div");
   block.className = "content-text";
+  block._spawned = [];
 
   const keywords = Array.isArray(node.keywords) ? node.keywords : [];
   const found = keywords
@@ -639,13 +766,22 @@ function renderTextNode(node, col) {
     const span = document.createElement("span");
     span.className = "keyword-highlight";
     span.textContent = k.word;
-    let used = false;
+    let spawnedBlock = null;
     span.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (used) return;
-      used = true;
-      span.classList.add("used");
-      renderChainNode(k.next, col, block);
+      if (spawnedBlock) {
+        // second click: recollect everything this keyword's expansion grew
+        block._spawned = block._spawned.filter(b => b !== spawnedBlock);
+        collapseBlock(spawnedBlock);
+        spawnedBlock = null;
+        span.classList.remove("used");
+      } else {
+        spawnedBlock = renderChainNode(k.next, col, block);
+        if (spawnedBlock) {
+          block._spawned.push(spawnedBlock);
+          span.classList.add("used");
+        }
+      }
       updateContentPositions();
     });
     block.appendChild(span);
@@ -656,62 +792,148 @@ function renderTextNode(node, col) {
 }
 
 
-// real path: central caption + central image, then a row of hotspot chips
-// (standing in for real image-region taps until mask assets exist) — tapping
-// one appends its linked expansions[hotspot.expandsTo] entry below, in
-// whatever order the person taps them, same column, growing downward.
-function renderRealContent(tree, col) {
-  const cc = tree.centralContent;
+// ---- Firestore parsing layer ----
+// Two schemas are supported, at every depth, so older hand-built test docs
+// (nested "expansions" maps, keyed by "expandsTo") keep working exactly as
+// before, while new docs (a flat top-level "nodes" map, every link using
+// "targetNodeId" to point directly into that map) are the intended path
+// going forward. A link entry is resolved new-style first if it carries a
+// targetNodeId; only if it doesn't do we fall back to the node's own local
+// "expansions" + "expandsTo" pair. "parentId" on a node is bookkeeping for
+// you in Firestore (lineage, readability) — the renderer never reads it;
+// traversal is driven entirely by which link points to which targetNodeId.
+function resolveNext(link, localExpansions, nodesMap) {
+  if (!link) return null;
+  if (link.targetNodeId) return nodeFromId(link.targetNodeId, nodesMap);
+  if (link.expandsTo) return firebaseNodeToChain((localExpansions || {})[link.expandsTo], null, nodesMap);
+  return null;
+}
 
-  const captionText = cc.introText || cc.caption || "";
-  if (captionText) {
-    const t = document.createElement("div");
-    t.className = "content-text";
-    t.textContent = captionText;
-    col.appendChild(t);
-  }
+// looks a node up by id in the document's flat "nodes" map and converts it
+function nodeFromId(nodeId, nodesMap) {
+  if (!nodeId) return null;
+  const raw = (nodesMap || {})[nodeId];
+  if (!raw) return null; // targetNodeId points at nothing real — render nothing, don't guess
+  return firebaseNodeToChain(raw, nodeId, nodesMap);
+}
 
-  const rootNode = firebaseNodeToChain(cc, true);
-  renderChainNode(rootNode, col, null);
+// finds every node whose own "parentId" points back at this one — this is
+// how an image's clickable regions are actually discovered in your schema:
+// each CHILD carries its own maskImageURL (the pixels for its own region on
+// the PARENT photo), rather than the parent listing a "hotspots" array.
+function childrenOf(nodeId, nodesMap) {
+  const map = nodesMap || {};
+  return Object.keys(map)
+    .filter(id => map[id] && map[id].parentId === nodeId)
+    .map(id => ({ id, raw: map[id] }));
+}
+
+// a couple of your nodes have contentType typed with the quote marks
+// literally baked into the string (e.g. the value is `"image"` — 7
+// characters — instead of just `image`) from typing them by hand into the
+// Firestore field editor. Stripped here so the code isn't tripped up by it
+// either way, but worth cleaning up in the console when you get a chance.
+function normalizeType(t) {
+  return typeof t === "string" ? t.replace(/^"+|"+$/g, "") : t;
+}
+
+// builds the intro's own node — always text-shaped, its own keyword links,
+// each one leading to a fully independent central content root. Reads
+// "introKeywordLinks" off the document root (new schema) first, falling
+// back to an old-style "keywords"/"expandsTo" list nested under "intro".
+function buildIntroNode(d) {
+  const nodesMap = d.nodes || {};
+  const cc = d.intro || {};
+  const linksRaw = Array.isArray(d.introKeywordsLinks) ? d.introKeywordsLinks
+    : Array.isArray(d.introKeywordLinks) ? d.introKeywordLinks
+    : Array.isArray(cc.introKeywordsLinks) ? cc.introKeywordsLinks
+    : Array.isArray(cc.introKeywordLinks) ? cc.introKeywordLinks
+    : Array.isArray(cc.keywords) ? cc.keywords
+    : [];
+  return {
+    text: cc.introText || cc.caption || cc.text || d.introText || d.caption || "",
+    keywords: linksRaw.map(link => ({
+      word: link.word,
+      next: resolveNext(link, cc.expansions, nodesMap)
+    }))
+  };
 }
 
 // converts one raw Firestore node into the generic {type, masks/keywords}
-// shape renderChainNode knows how to draw. The CENTRAL image is always
-// treated as an image (it has no "type" field of its own by design). Any
-// OTHER node — an expansion — must explicitly say type:"image" or
-// type:"text"; anything ambiguous or malformed renders as nothing rather
-// than being guessed at, so incomplete Firebase data never produces a
-// fabricated placeholder.
-function firebaseNodeToChain(raw, isCentral) {
+// shape renderChainNode knows how to draw. Every node — at any depth,
+// including what an intro keyword points to — must explicitly say
+// type:"image"/"text"/"video"/"audio"/"file"/"pdf"; anything ambiguous or
+// malformed renders as nothing rather than being guessed at, so incomplete
+// Firebase data never produces a fabricated placeholder.
+function firebaseNodeToChain(raw, nodeId, nodesMap) {
   if (!raw) return null;
-  const expansions = raw.expansions || {};
+  // real field is "contentType" — "type" kept as a fallback for older docs
+  const t = normalizeType(raw.contentType || raw.type);
+  const expansions = raw.expansions || {}; // only used for old-style local fallback links
 
-  if (isCentral || raw.type === "image") {
-    const hotspots = Array.isArray(raw.hotspots) ? raw.hotspots : [];
+  if (t === "image") {
+    const kids = childrenOf(nodeId, nodesMap);
+    let masks;
+    if (kids.length) {
+      // your actual schema: each child IS a mask region on this image,
+      // found via its own parentId, carrying its own maskImageURL
+      masks = kids.map(({ id, raw: childRaw }) => ({
+        maskImageURL: childRaw.maskImageURL || "",
+        next: firebaseNodeToChain(childRaw, id, nodesMap)
+      }));
+    } else {
+      // fallback for an older-style doc where the parent lists its own
+      // hotspots array instead
+      const hotspots = Array.isArray(raw.hotspotsLinks) ? raw.hotspotsLinks
+        : Array.isArray(raw.hotspots) ? raw.hotspots
+        : [];
+      masks = hotspots.map(h => ({
+        maskImageURL: h.maskImageURL || "",
+        next: resolveNext(h, expansions, nodesMap)
+      }));
+    }
     return {
       type: "image",
       imageURL: raw.imageURL || "",
-      depthMapURL: raw.depthMapURL || "",
-      masks: hotspots.map(h => ({
-        maskImageURL: h.maskImageURL || "",
-        next: firebaseNodeToChain(expansions[h.expandsTo])
-      }))
+      depthMapURL: raw.depthMapURL || raw.dpthMapURL || "",
+      masks
     };
   }
 
-  if (raw.type === "text") {
-    const keywordsRaw = Array.isArray(raw.keywords) ? raw.keywords : [];
+  if (t === "text") {
+    // real field is "KeywordLinks" (capital K) — other casings/names kept as fallback
+    const linksRaw = Array.isArray(raw.KeywordLinks) ? raw.KeywordLinks
+      : Array.isArray(raw.keywordsLinks) ? raw.keywordsLinks
+      : Array.isArray(raw.keywordLinks) ? raw.keywordLinks
+      : Array.isArray(raw.keywords) ? raw.keywords
+      : [];
     return {
       type: "text",
       text: raw.text || "",
-      keywords: keywordsRaw.map(k => ({
-        word: k.word,
-        next: firebaseNodeToChain(expansions[k.expandsTo])
+      keywords: linksRaw.map(k => ({
+        word: (typeof k === "string") ? k : k.word,
+        next: resolveNext(k, expansions, nodesMap)
       }))
     };
   }
 
-  return null; // no recognized type — render nothing rather than guessing
+  if (t === "video" || t === "audio") {
+    const timestampsRaw = Array.isArray(raw.timestamps) ? raw.timestamps : [];
+    return {
+      type: t,
+      mediaURL: raw.mediaURL || "",
+      timestamps: timestampsRaw.map(ts => ({
+        atSeconds: ts.atSeconds,
+        next: resolveNext(ts, expansions, nodesMap)
+      }))
+    };
+  }
+
+  if (t === "file" || t === "pdf") {
+    return { type: t, mediaURL: raw.mediaURL || "" };
+  }
+
+  return null; // no recognized contentType — render nothing rather than guessing
 }
 
 // ---- crossing detector: finds every pair of currently-open content-columns
@@ -819,7 +1041,7 @@ window.addEventListener("resize", () => {
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
 
-  // Your data nests everything inside a "centralContent" map field, not at
+  // Your data nests the intro's fields under a top-level "intro" map, not at
   // the document root — matching that structure here.
   let firebaseResponded = false;
   setTimeout(() => {
@@ -836,17 +1058,17 @@ window.addEventListener("resize", () => {
       let skippedForCoords = 0;
       snapshot.forEach((doc) => {
         const d = doc.data();
-        const cc = d.centralContent || {};
-        // check both possible locations: nested under centralContent, or at the document root
+        const cc = d.intro || {};
+        // check both possible locations: nested under the intro map, or at the document root
         const lat = (typeof cc.latitude === "number") ? cc.latitude : d.latitude;
         const lng = (typeof cc.longitude === "number") ? cc.longitude : d.longitude;
         if (typeof lat !== "number" || typeof lng !== "number") { skippedForCoords++; return; }
         trees.push({
           id: doc.id,
           lat, lng,
-          title: cc.title || d.title || "",
+          title: doc.id, // the document's own name IS the title shown on the status bar
           intro: cc.introText || cc.caption || d.introText || d.caption || "",
-          centralContent: cc
+          introRaw: d // whole document — nodes, introKeywordsLinks etc. live at the root, not nested
         });
       });
       window.setStatusDefault(
