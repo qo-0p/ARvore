@@ -612,6 +612,16 @@ function isMaskHit(canvas, fracX, fracY) {
   }
 }
 
+// returns the element new content spawned from this block should be
+// inserted after: the most recently opened sibling if there is one,
+// otherwise the block itself. This is what makes multiple clicks land in
+// the order they were clicked, top to bottom, instead of each new one
+// jumping back to right after the original trigger.
+function lastSpawnAnchor(block) {
+  const arr = block._spawned;
+  return (arr && arr.length) ? arr[arr.length - 1] : block;
+}
+
 // real depth-driven parallax: displaces the photo's pixels using its actual
 // depthMapURL file (brighter = nearer = shifts more), direction/intensity
 // following cursor or finger position. Experimental — needs a real depth
@@ -630,7 +640,11 @@ function applyParallax(block, depthMapURL) {
   document.body.appendChild(svgFilter);
   const displacementEl = svgFilter.querySelector("feDisplacementMap");
 
-  block.style.filter = (block.style.filter ? block.style.filter + " " : "") + `url(#${filterId})`;
+  // grayscale(100%) is applied via CSS on .content-image-real — setting
+  // block.style.filter directly (inline style) overrides that class rule
+  // entirely rather than adding to it, so grayscale must be re-stated here
+  // alongside the depth filter or the photo comes back in full color.
+  block.style.filter = "grayscale(100%) " + `url(#${filterId})`;
   block.classList.add("has-depth");
 
   function setFromPoint(clientX, clientY) {
@@ -640,6 +654,15 @@ function applyParallax(block, depthMapURL) {
   }
   block.addEventListener("pointermove", (e) => setFromPoint(e.clientX, e.clientY));
   block.addEventListener("pointerleave", () => displacementEl.setAttribute("scale", "0"));
+}
+
+// a real, usable depth map URL — not empty, and not one of the placeholder
+// strings ("pending", "<pending>", "optional", etc.) used while the real
+// Cloudinary file isn't uploaded yet. Without this check, any placeholder
+// text was being treated as "yes, apply the parallax filter", which broke
+// the grayscale look on every image that had one.
+function hasRealURL(v) {
+  return typeof v === "string" && /^https?:\/\//i.test(v.trim());
 }
 
 function renderImageNode(node, col) {
@@ -661,11 +684,14 @@ function renderImageNode(node, col) {
     block.appendChild(visual);
 
     let hitCanvas = null;
-    loadMaskCanvas(m.maskImageURL, (canvas) => { hitCanvas = canvas; });
+    loadMaskCanvas(m.maskImageURL, (canvas) => {
+      hitCanvas = canvas;
+      if (!canvas) console.warn("Mask image failed to load (bad URL or CORS-blocked):", m.maskImageURL);
+    });
 
     let spawnedBlock = null;
     block.addEventListener("click", (e) => {
-      if (!hitCanvas) return;
+      if (!hitCanvas) return; // mask pixels never loaded — see console warning above
       const rect = block.getBoundingClientRect();
       const fracX = (e.clientX - rect.left) / rect.width;
       const fracY = (e.clientY - rect.top) / rect.height;
@@ -678,7 +704,7 @@ function renderImageNode(node, col) {
         spawnedBlock = null;
         visual.classList.remove("used");
       } else {
-        spawnedBlock = renderChainNode(m.next, col, block);
+        spawnedBlock = renderChainNode(m.next, col, lastSpawnAnchor(block));
         if (spawnedBlock) {
           block._spawned.push(spawnedBlock);
           visual.classList.add("used");
@@ -688,7 +714,7 @@ function renderImageNode(node, col) {
     });
   });
 
-  if (node.depthMapURL) applyParallax(block, node.depthMapURL);
+  if (hasRealURL(node.depthMapURL)) applyParallax(block, node.depthMapURL);
 
   return block;
 }
@@ -716,18 +742,20 @@ function renderAudioNode(node, col) {
 }
 
 // as playback crosses each configured timestamp, its linked expansion just
-// pops in — right after the media element (so the newest sits closest to
-// it, older ones pushed down, same "insert after trigger" rule as
-// everything else). Playback itself is never paused or interrupted.
+// pops in — each new one chained after whichever popped in most recently,
+// so they stack in the order they actually played, oldest on top, newest
+// at the bottom. Playback itself is never paused or interrupted.
 function attachTimestamps(mediaEl, node, col) {
   const stamps = Array.isArray(node.timestamps) ? node.timestamps : [];
   if (!stamps.length) return;
+  mediaEl._spawned = [];
   const triggered = new Set();
   mediaEl.addEventListener("timeupdate", () => {
     stamps.forEach((t, i) => {
       if (triggered.has(i) || mediaEl.currentTime < t.atSeconds) return;
       triggered.add(i);
-      renderChainNode(t.next, col, mediaEl);
+      const spawned = renderChainNode(t.next, col, lastSpawnAnchor(mediaEl));
+      if (spawned) mediaEl._spawned.push(spawned);
       updateContentPositions();
     });
   });
@@ -776,7 +804,7 @@ function renderTextNode(node, col) {
         spawnedBlock = null;
         span.classList.remove("used");
       } else {
-        spawnedBlock = renderChainNode(k.next, col, block);
+        spawnedBlock = renderChainNode(k.next, col, lastSpawnAnchor(block));
         if (spawnedBlock) {
           block._spawned.push(spawnedBlock);
           span.classList.add("used");
